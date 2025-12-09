@@ -1,0 +1,130 @@
+from nicegui import ui, app
+from tinydb import TinyDB, Query
+from datetime import datetime, timedelta
+
+# --- 1. CONFIGURACIÓN Y BASE DE DATOS (TinyDB) ---
+# Esto crea un archivo 'db.json' automáticamente en tu carpeta
+db = TinyDB('db.json')
+
+# Función para adaptar el formato de TinyDB al de FullCalendar
+def get_events():
+    events = []
+    for item in db.all():
+        events.append({
+            'id': str(item.doc_id), # FullCalendar necesita ID string
+            'title': item['title'],
+            'start': item['start'],
+            'end': item['end'],
+            'color': item.get('color', '#3788d8'),
+            'allDay': True
+        })
+    return events
+
+# --- 2. LÓGICA DE PYTHON (Backend) ---
+
+def handle_add_task():
+    # Añadimos tarea por defecto de 1 día de duración
+    if not new_task_input.value:
+        ui.notify('Escribe un nombre para la tarea', type='warning')
+        return
+
+    today = datetime.now().strftime('%Y-%m-%d')
+    tomorrow = (datetime.now() + timedelta(days=1)).strftime('%Y-%m-%d')
+    
+    # Insertar en BBDD
+    db.insert({
+        'title': new_task_input.value,
+        'start': today, 
+        'end': tomorrow,
+        'color': color_picker.value
+    })
+    
+    new_task_input.value = '' # Limpiar input
+    refresh_calendar()
+    ui.notify('Tarea añadida. ¡Arrástrala para organizarla!')
+
+def handle_update(e):
+    # Se ejecuta cuando arrastras (drop) o estiras (resize) una tarea
+    event_id = int(e.args['id'])
+    
+    # Actualizamos solo las fechas en la BBDD
+    db.update({
+        'start': e.args['start'].split('T')[0], # Limpiamos formato ISO
+        'end': e.args['end'].split('T')[0] if e.args['end'] else None
+    }, doc_ids=[event_id])
+    
+    ui.notify(f'Tarea actualizada')
+
+def handle_click(e):
+    # V1: Clicar en una tarea la elimina (simple)
+    event_id = int(e.args['id'])
+    task = db.get(doc_id=event_id)
+    
+    # Diálogo de confirmación
+    with ui.dialog() as dialog, ui.card():
+        ui.label(f"¿Borrar '{task['title']}'?")
+        with ui.row():
+            ui.button('Borrar', color='red', on_click=lambda: [db.remove(doc_ids=[event_id]), refresh_calendar(), dialog.close()])
+            ui.button('Cancelar', on_click=dialog.close)
+    dialog.open()
+
+def refresh_calendar():
+    # Truco: Recargamos los eventos llamando a la API de JS desde Python
+    ui.run_javascript(f'window.vanCalendar.removeAllEvents(); window.vanCalendar.addEventSource({str(get_events())});')
+
+# --- 3. INTERFAZ VISUAL (Frontend) ---
+
+# Cargar FullCalendar desde CDN
+ui.add_head_html('<script src="https://cdn.jsdelivr.net/npm/fullcalendar@6.1.10/index.global.min.js"></script>')
+
+with ui.column().classes('w-full h-screen p-6 bg-slate-100'):
+    
+    # --- Cabecera y Controles ---
+    with ui.row().classes('w-full items-center gap-4 mb-4'):
+        ui.label('🚐 Cliff 600 Planner').classes('text-2xl font-bold text-slate-700')
+        
+        # Input simple
+        new_task_input = ui.input(placeholder='Nueva tarea (ej: Cortar perfiles)').classes('w-64 bg-white rounded px-2')
+        
+        # Selector de color simple
+        color_picker = ui.select({
+            '#3788d8': 'Azul (Estructura)', 
+            '#27ae60': 'Verde (Acabados)', 
+            '#e74c3c': 'Rojo (Urgente)'
+        }, value='#3788d8').classes('w-40')
+        
+        ui.button('Añadir', on_click=handle_add_task, icon='add').classes('bg-slate-700 text-white')
+
+    # --- El Calendario ---
+    with ui.card().classes('w-full h-5/6 shadow-xl no-shadow-border'):
+        ui.element('div').props('id=calendar').classes('w-full h-full font-sans')
+
+    # --- Inicialización JS ---
+    def init_calendar():
+        events_json = get_events()
+        ui.run_javascript(f'''
+            var calendarEl = document.getElementById('calendar');
+            var calendar = new FullCalendar.Calendar(calendarEl, {{
+                initialView: 'dayGridMonth',
+                headerToolbar: {{ center: 'title', right: 'dayGridMonth,listWeek' }},
+                locale: 'es',
+                editable: true,  // ¡Habilita el arrastrar y soltar!
+                events: {str(events_json)},
+                
+                // Conectamos eventos JS -> Python
+                eventDrop: info => emitEvent('update_event', {{id: info.event.id, start: info.event.start.toISOString(), end: info.event.end ? info.event.end.toISOString() : null}}),
+                eventResize: info => emitEvent('update_event', {{id: info.event.id, start: info.event.start.toISOString(), end: info.event.end.toISOString()}}),
+                eventClick: info => emitEvent('click_event', {{id: info.event.id}})
+            }});
+            calendar.render();
+            window.vanCalendar = calendar;
+        ''')
+    
+    # Escuchas de eventos personalizados
+    ui.on('update_event', handle_update)
+    ui.on('click_event', handle_click)
+    
+    # Arrancar calendario al cargar
+    ui.timer(0.1, init_calendar, once=True)
+
+ui.run(title='Van Project V1', reload=False)
